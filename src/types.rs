@@ -88,6 +88,8 @@ pub struct ScanConfigBuilder {
     // When true, do not call the LLM; instead, return the prompts that would be used
     return_prompts: bool,
     only: Option<Vec<ArtifactKind>>,
+    allow_stdio: bool,
+    trust_workspace_configs: bool,
 }
 
 impl Default for ScanConfigBuilder {
@@ -100,6 +102,8 @@ impl Default for ScanConfigBuilder {
             auth_headers: None,
             return_prompts: false,
             only: None,
+            allow_stdio: false,
+            trust_workspace_configs: false,
         }
     }
 }
@@ -144,6 +148,11 @@ impl ScanConfigBuilder {
         self
     }
 
+    pub fn allow_stdio(mut self, allow_stdio: bool) -> Self {
+        self.allow_stdio = allow_stdio;
+        self
+    }
+
     pub fn build(self) -> ScanOptions {
         ScanOptions {
             timeout: self.timeout,
@@ -153,6 +162,8 @@ impl ScanConfigBuilder {
             auth_headers: self.auth_headers,
             return_prompts: self.return_prompts,
             only: self.only,
+            allow_stdio: self.allow_stdio,
+            trust_workspace_configs: self.trust_workspace_configs,
         }
     }
 }
@@ -234,6 +245,16 @@ pub struct ScanOptions {
     /// Restrict the scan to a subset of artifact kinds. `None` = scan all.
     /// Set via the `--only` CLI flag; see `ArtifactKind::parse_set`.
     pub only: Option<Vec<ArtifactKind>>,
+    /// Permit `stdio:` targets, which launch a local command as a subprocess.
+    /// Only trusted callers set this (the CLI, and the stdio MCP server whose
+    /// parent process already controls the host). Network-facing callers keep
+    /// the default `false`, so a request body can never launch a process.
+    pub allow_stdio: bool,
+    /// Permit launching stdio servers defined by a workspace config: one found
+    /// in the working directory, a parent directory, or under `--root`. Those
+    /// files come from the repository being scanned, so they stay static-only
+    /// unless the operator opts in for the run.
+    pub trust_workspace_configs: bool,
 }
 
 impl Default for ScanOptions {
@@ -246,6 +267,8 @@ impl Default for ScanOptions {
             auth_headers: None,
             return_prompts: false,
             only: None,
+            allow_stdio: false,
+            trust_workspace_configs: false,
         }
     }
 }
@@ -483,6 +506,8 @@ mod tests {
             auth_headers: None,
             return_prompts: false,
             only: None,
+            allow_stdio: false,
+            trust_workspace_configs: false,
         };
 
         let result = config_utils::validate_scan_config(&options);
@@ -499,6 +524,8 @@ mod tests {
             auth_headers: None,
             return_prompts: false,
             only: None,
+            allow_stdio: false,
+            trust_workspace_configs: false,
         };
 
         let result = config_utils::validate_scan_config(&options);
@@ -519,6 +546,8 @@ mod tests {
             auth_headers: None,
             return_prompts: false,
             only: None,
+            allow_stdio: false,
+            trust_workspace_configs: false,
         };
 
         let result = config_utils::validate_scan_config(&options);
@@ -539,6 +568,8 @@ mod tests {
             auth_headers: None,
             return_prompts: false,
             only: None,
+            allow_stdio: false,
+            trust_workspace_configs: false,
         };
 
         let result = config_utils::validate_scan_config(&options);

@@ -441,7 +441,7 @@ integration-test: ## Run integration tests (CLI, config, server startup)
 	@echo "Running integration tests..."
 	@cargo build --release
 	@./target/release/$(PROJECT_NAME) --help
-	@./target/release/$(PROJECT_NAME) init-config --force
+	@tmp=$$(mktemp -d) && (cd "$$tmp" && "$(CURDIR)/target/release/$(PROJECT_NAME)" init-config --force) && rm -rf "$$tmp"
 	@echo "Testing server startup and shutdown..."
 	@# Start server in background and capture PID
 	@./target/release/$(PROJECT_NAME) server --port 3000 & SERVER_PID=$$!; \

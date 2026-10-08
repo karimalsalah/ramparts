@@ -157,6 +157,8 @@ Options:
       --root <PATH>               Walk this directory for MCP config files instead of the
                                   user's home/IDE locations. Useful for scanning a
                                   checked-in repo of IDE configs in CI.
+      --trust-workspace-configs   Launch stdio servers from workspace configs (the working
+                                  directory, a parent directory, or --root). Off by default.
       --only <KINDS>              Restrict scan to a subset of artifact kinds
                                   (tools, prompts, resources)
   -h, --help                      Print help information
@@ -189,6 +191,10 @@ ramparts scan-config --report
 # and similar build directories. Symlinks are not followed.
 ramparts scan-config --root ./ide-configs --format sarif > ramparts.sarif
 ```
+
+Stdio servers defined in a workspace config (the working directory, a parent directory, or
+`--root`) are analyzed statically and not launched. Pass `--trust-workspace-configs` only for
+a config you trust, because it can name any local command.
 
 **Only tool definitions (skip prompts/resources):**
 ```bash
@@ -489,7 +495,7 @@ ramparts server [OPTIONS]
 ```bash
 Options:
   -p, --port <PORT>               Server port [default: 3000]
-      --host <HOST>               Server host [default: 0.0.0.0]
+      --host <HOST>               Server host [default: 127.0.0.1]
       --config <FILE>             Configuration file path
   -h, --help                      Print help information
 ```
@@ -672,8 +678,8 @@ ramparts scan <url> --output json | \
   curl -X POST -H "Content-Type: application/json" \
        -d @- https://webhook.example.com/ramparts
 
-# Check exit code and send alert
-if ! ramparts scan <url> --min-severity high; then
+# Alert when the scan command itself fails
+if ! ramparts scan <url> --json > scan.json; then
   echo "High severity issues found!" | mail -s "Security Alert" admin@example.com
 fi
 ```
@@ -690,40 +696,15 @@ Ramparts looks for configuration files in the following order:
 
 ## Shell Completion
 
-Generate shell completion scripts:
-
-### Bash
-```bash
-ramparts --generate-completion bash > /etc/bash_completion.d/ramparts
-```
-
-### Zsh
-```bash
-ramparts --generate-completion zsh > ~/.zsh/completions/_ramparts
-```
-
-### Fish
-```bash
-ramparts --generate-completion fish > ~/.config/fish/completions/ramparts.fish
-```
-
-### PowerShell
-```powershell
-ramparts --generate-completion powershell > ramparts.ps1
-```
-
-*Note: Completion generation may not be available in all versions.*
+Shell completion generation is not implemented in this release; there is no `--generate-completion` flag.
 
 ## Advanced Usage Examples
 
 ### Advanced Scanning Options
 
 ```bash
-# Custom severity threshold
-ramparts scan <url> --min-severity HIGH
-
-# JSON output with formatting
-ramparts scan <url> --output json --pretty
+# JSON output
+ramparts scan <url> --json
 
 # Custom configuration file
 ramparts scan <url> --config custom-ramparts.yaml
@@ -740,7 +721,7 @@ Ramparts can run as a REST API server for continuous monitoring:
 # Start server (default: localhost:3000)
 ramparts server
 
-# Custom host and port
+# Custom host and port. Non-loopback hosts need RAMPARTS_API_TOKEN.
 ramparts server --port 8080 --host 0.0.0.0
 ```
 
@@ -767,7 +748,6 @@ ramparts scan --batch servers.txt
 **JSON Format**
 - Machine-readable structured output
 - Perfect for scripts and automation
-- Use `--pretty` for formatted output
 
 **Raw Format**
 - Preserves original MCP server responses
@@ -777,5 +757,4 @@ ramparts scan --batch servers.txt
 ### Integration Examples
 
 **Server Mode Integration:**
-- 📚 **[Complete API Documentation](docs/api.md)** - REST endpoints and request/response formats
-- 🔧 **[Integration Patterns](docs/integration.md)** - CI/CD, Docker, Kubernetes, and monitoring examples
+- 📚 **[Complete API Documentation](api.md)** - REST endpoints and request/response formats

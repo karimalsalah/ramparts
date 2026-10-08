@@ -55,7 +55,7 @@ scanner:
 # Security Analysis Configuration
 security:
   enabled: true                        # Enable security analysis
-  min_severity: "low"                  # Minimum severity to report: "low", "medium", "high", "critical"
+  min_severity: "low"                  # Not enforced yet (see note below)
   
   # Security check categories
   checks:
@@ -201,6 +201,8 @@ security:
     pii_leakage: true
     jailbreak: true
 ```
+
+> **Not enforced yet:** `min_severity` and the `checks` toggles are parsed, but no code path reads them. Every detection category runs whatever these values say. `security.enabled` is enforced.
 
 **Security Check Types:**
 

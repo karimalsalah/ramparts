@@ -1,8 +1,8 @@
 [package]
 name = "ramparts-common"
-# Bumped to 0.8.1 in lockstep with the root crate. ramparts-common
-# is being published to crates.io for the first time as part of
-# this version (see release-plz.toml `publish = true`).
+# Versioned independently of the root crate (root 0.8.2, this 0.8.1).
+# The root manifest's path dependency pins this version and must match it
+# before publish. release-plz (see release-plz.toml `publish = true`) owns bumps.
 version = "0.8.1"
 edition = "2021"
 authors = ["Sharath Rajasekar <sharath@highflame.com>"]

@@ -3,9 +3,14 @@ use crate::core::{
     MCPScannerCore, RefreshToolsRequest, RefreshToolsResponse, RegisterServerRequest,
     RegisterServerResponse, ScanRequest, ScanResponse, ValidationResponse,
 };
+use crate::http_guard::{self, GuardConfig};
+use crate::target_policy::{
+    classify_scan_target, reject_forbidden_target, ScanTargetKind, STDIO_REFUSED,
+};
 use axum::{
     extract::State,
-    http::{HeaderMap, Method, StatusCode},
+    http::{HeaderMap, StatusCode},
+    middleware,
     response::Json,
     routing::{get, post},
     Router,
@@ -16,7 +21,6 @@ use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
-use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 
@@ -36,84 +40,9 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: 3000,
-            host: "0.0.0.0".to_string(),
+            host: "127.0.0.1".to_string(),
         }
     }
-}
-
-/// Reject scan targets that resolve to the host itself or to private networks.
-///
-/// The scan endpoints make the server fetch a caller-supplied URL, which is a
-/// textbook request-forgery primitive: without this, a caller reaches
-/// `169.254.169.254` for cloud credentials, or any service bound to the host's
-/// private interfaces. Set `RAMPARTS_ALLOW_PRIVATE_TARGETS=1` to scan internal
-/// servers deliberately.
-fn reject_forbidden_target(raw_url: &str) -> Result<(), String> {
-    let allow_private = std::env::var("RAMPARTS_ALLOW_PRIVATE_TARGETS").is_ok_and(|v| v == "1");
-    reject_forbidden_target_with(raw_url, allow_private)
-}
-
-/// The policy itself, with the environment read out of it, so tests exercise
-/// the rules without mutating process-global state.
-fn reject_forbidden_target_with(raw_url: &str, allow_private: bool) -> Result<(), String> {
-    if allow_private {
-        return Ok(());
-    }
-
-    // Normalize the same way the scanner does before inspecting the host.
-    let candidate = if raw_url.contains("://") {
-        raw_url.to_string()
-    } else {
-        format!("http://{raw_url}")
-    };
-
-    let parsed = url::Url::parse(&candidate).map_err(|e| format!("Invalid URL: {e}"))?;
-
-    // Match on the typed host. `host_str` returns an IPv6 literal wrapped in
-    // brackets ("[::1]"), which does not parse as an IpAddr — so a string-based
-    // check silently lets IPv6 loopback through.
-    let ip = match parsed.host() {
-        Some(url::Host::Ipv4(v4)) => Some(std::net::IpAddr::V4(v4)),
-        Some(url::Host::Ipv6(v6)) => Some(std::net::IpAddr::V6(v6)),
-        Some(url::Host::Domain(domain)) => {
-            let lowered = domain.to_ascii_lowercase();
-            if lowered == "localhost" || lowered.ends_with(".localhost") {
-                return Err(
-                    "Refusing to scan a loopback address. Set RAMPARTS_ALLOW_PRIVATE_TARGETS=1 \
-                     to allow it."
-                        .to_string(),
-                );
-            }
-            // A bare domain may still resolve into private space. Resolution
-            // happens later in the HTTP stack, so this check is best-effort by
-            // design; the literal forms below are what an attacker reaches for.
-            None
-        }
-        None => return Err("URL has no host".to_string()),
-    };
-
-    if let Some(ip) = ip {
-        let forbidden = match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback()
-                    || v4.is_private()
-                    || v4.is_link_local()
-                    || v4.is_broadcast()
-                    || v4.is_unspecified()
-            }
-            std::net::IpAddr::V6(v6) => {
-                v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xffc0) == 0xfe80
-            }
-        };
-        if forbidden {
-            return Err(format!(
-                "Refusing to scan {ip}: loopback, private, or link-local address. \
-                 Set RAMPARTS_ALLOW_PRIVATE_TARGETS=1 to allow it."
-            ));
-        }
-    }
-
-    Ok(())
 }
 
 pub struct MCPScannerServer {
@@ -146,20 +75,13 @@ impl MCPScannerServer {
             rate_limiter: Arc::new(RwLock::new(HashMap::new())),
         };
 
-        // Configure CORS
-        let cors = CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-            .allow_headers(Any);
+        // The API sits behind the transport guard (Host and Origin checks, plus a
+        // bearer token on any non-loopback bind). The probe routes stay open so
+        // orchestrators can see the listener is up without credentials.
+        let guard = Arc::new(GuardConfig::from_env(&self.config.host));
+        guard.log_posture();
 
-        // Create router with routes
-        let app = Router::new()
-            // Root-level k8s probe endpoints (platform convention).
-            // Dependency-free so the pod reports ready as soon as the
-            // listener is up.
-            .route("/health", get(probe_ok))
-            .route("/healthz", get(probe_ok))
-            .route("/livez", get(probe_ok))
+        let api = Router::new()
             .route("/v1/ramparts/", get(api_docs))
             .route("/v1/ramparts/health", get(health_check))
             .route("/v1/ramparts/protocol", get(protocol_info))
@@ -177,7 +99,19 @@ impl MCPScannerServer {
                 post(unregister_server_endpoint),
             )
             .route("/v1/ramparts/list-servers", get(list_servers_endpoint))
-            .layer(cors)
+            .layer(middleware::from_fn_with_state(
+                guard.clone(),
+                http_guard::guard,
+            ));
+
+        // Root-level k8s probe endpoints (platform convention). Dependency-free
+        // so the pod reports ready as soon as the listener is up.
+        let app = Router::new()
+            .route("/health", get(probe_ok))
+            .route("/healthz", get(probe_ok))
+            .route("/livez", get(probe_ok))
+            .merge(api)
+            .layer(guard.cors_layer())
             .layer(TraceLayer::new_for_http())
             .with_state(state);
 
@@ -435,18 +369,30 @@ async fn scan_endpoint(
         ));
     }
 
-    // Validate URL format - only HTTP/HTTPS supported with rmcp
-    if !request.url.contains("://") {
-        // Allow URLs without scheme - they'll be normalized to http://
-    } else if !request.url.starts_with("http://") && !request.url.starts_with("https://") {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "success": false,
-                "error": "Only HTTP and HTTPS URLs are supported",
-                "timestamp": chrono::Utc::now().to_rfc3339()
-            })),
-        ));
+    // Network callers may name remote endpoints only. `stdio:` launches a local
+    // process, so it is refused here in every spelling, including scheme-less.
+    match classify_scan_target(&request.url) {
+        Ok(ScanTargetKind::Http) => {}
+        Ok(ScanTargetKind::Stdio) => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "success": false,
+                    "error": STDIO_REFUSED,
+                    "timestamp": chrono::Utc::now().to_rfc3339()
+                })),
+            ));
+        }
+        Err(reason) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "success": false,
+                    "error": reason,
+                    "timestamp": chrono::Utc::now().to_rfc3339()
+                })),
+            ));
+        }
     }
 
     // Block request-forgery targets before the scanner fetches anything.
@@ -635,9 +581,14 @@ async fn batch_scan_endpoint(
         ));
     }
 
-    // Apply the forgery guard to every target, not just the first.
+    // Apply the same target policy to every URL, not just the first.
     for url in &request.urls {
-        if let Err(reason) = reject_forbidden_target(url) {
+        let verdict = match classify_scan_target(url) {
+            Ok(ScanTargetKind::Http) => reject_forbidden_target(url),
+            Ok(ScanTargetKind::Stdio) => Err(STDIO_REFUSED.to_string()),
+            Err(reason) => Err(reason),
+        };
+        if let Err(reason) = verdict {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(json!({
@@ -883,13 +834,16 @@ async fn check_rate_limit(state: &ServerState, urls: &[String]) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::target_policy::reject_forbidden_target_with;
     // Note: StatusCode is used in the validation logic but not in tests
 
     #[test]
     fn test_server_config_default() {
         let config = ServerConfig::default();
         assert_eq!(config.port, 3000);
-        assert_eq!(config.host, "0.0.0.0");
+        // Loopback by default. Wider binds are an explicit operator choice and
+        // then require a bearer token (see http_guard).
+        assert_eq!(config.host, "127.0.0.1");
     }
 
     #[test]
