@@ -60,7 +60,10 @@ futures = "0.3"
 # JSON handling
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
+# serde_yaml (deprecated) depends on unsafe-libyaml, which RustSec marks
+# unmaintained (RUSTSEC-2024-0449). serde_norway is a maintained fork
+# with the same 0.9 API; the rename keeps every `serde_yaml::` path as is.
+serde_yaml = { package = "serde_norway", version = "0.9" }
 sha2 = "0.10"
 schemars = "1"
 
@@ -109,29 +112,31 @@ tower = "0.4"
 
 # JSON-RPC handling for microservice
 jsonrpc-core = "18.0"
-# yara-x is git-pinned to a post-v1.16.0 commit that bumps wasmtime
-# from 43.0.1 to 43.0.2, clearing RUSTSEC-2026-0114 (panic when
-# allocating a table exceeding the host's address space). This does
-# not clear RUSTSEC-2026-0222; keep that advisory documented in
-# .cargo/audit.toml until upstream depends on a patched wasmtime.
+# yara-x is git-pinned to a post-v1.21.0 commit (da19715d, 2026-10) that
+# upgrades wasmtime to 48.0.6. The newest crates.io release (1.21.0)
+# still depends on wasmtime 45, which has no patched 45.x line for
+# RUSTSEC-2026-0269 (filesystem sandbox escape), RUSTSEC-2026-0316
+# (hostcall fuel limit) and RUSTSEC-2026-0327 (async-lifted callback
+# stack overflow). wasmtime 48.0.6 also clears RUSTSEC-2026-0222 and
+# the older RUSTSEC-2026-0114.
 #
-# `version = "1.16.0"` is required for `cargo publish` of the
-# `ramparts` crate — when ramparts is published, `path` and `git`
+# `version = "1.21.0"` is required for `cargo publish` of the
+# `ramparts` crate: when ramparts is published, `path` and `git`
 # are stripped and only `version` remains in the published
 # tarball. Without it, `cargo publish` errors:
 #   "dependency `yara-x` does not specify a version".
 #
 # Note the divergence this creates:
-#   - Workspace + GitHub-released binaries: use the git pin (clears
-#     RUSTSEC-2026-0114, still affected by RUSTSEC-2026-0222).
-#   - `cargo install ramparts` from crates.io: resolves yara-x to
-#     the crates.io version (1.16.0, has the wasmtime CVE).
-# The CVE's attack vector (oversized table allocation in a WASM
-# module) is essentially unreachable from ramparts because we only
-# load bundled rules under `rules/pre/*.yar`, never user-supplied
-# WASM. Switch back to a clean `version = "1.17"` (no git pin)
-# once yara-x cuts that release.
-yara-x = { git = "https://github.com/VirusTotal/yara-x", rev = "664cdfe66fd40826d160fa7009966d9c8a43cba6", version = "1.16.0", optional = true }
+#   - Workspace + GitHub-released binaries: use the git pin (patched
+#     wasmtime 48.0.6).
+#   - `cargo install ramparts` from crates.io: resolves yara-x to the
+#     crates.io release (1.21.0, wasmtime 45, still affected).
+# These advisories' attack vectors (malicious WASM/components, WASI
+# filesystem access) are essentially unreachable from ramparts because
+# we only load bundled rules under `rules/pre/*.yar`, never
+# user-supplied WASM. Switch back to a plain crates.io version (no git
+# pin) once yara-x cuts a release that depends on wasmtime >= 48.0.4.
+yara-x = { git = "https://github.com/VirusTotal/yara-x", rev = "da19715dd4c8933d3b8e90d286baae8b2cc2e8b2", version = "1.21.0", optional = true }
 
 # Official Rust MCP SDK
 rmcp = { version = "3.1", features = [
