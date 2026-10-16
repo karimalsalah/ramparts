@@ -50,7 +50,7 @@ jobs:
         uses: actions/create-github-app-token@v3
         id: token
         with:
-          client-id: ${{ secrets.HIGHFLAME_GITHUB_APP_ID }}
+          app-id: ${{ secrets.HIGHFLAME_GITHUB_APP_ID }}
           private-key: ${{ secrets.HIGHFLAME_GITHUB_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 

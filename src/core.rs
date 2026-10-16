@@ -1,7 +1,8 @@
 use crate::config::{ScannerConfig, ScannerConfigManager};
 use crate::scanner::{MCPScanner, ScanData};
 
-use crate::types::{config_utils, MCPTool, ScanConfigBuilder, ScanOptions, ScanResult};
+use crate::target_policy::{admit_target, CallerTrust};
+use crate::types::{config_utils, MCPTool, ScanConfigBuilder, ScanOptions, ScanResult, ScanStatus};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -164,10 +165,19 @@ pub struct ListRegisteredServersResponse {
 pub struct MCPScannerCore {
     scanner: MCPScanner,
     config_manager: ScannerConfigManager,
+    trust: CallerTrust,
 }
 
 impl MCPScannerCore {
+    /// A core for network-facing callers. Stdio targets are refused and the
+    /// SSRF guard applies to every URL.
     pub fn new() -> Result<Self> {
+        Self::with_trust(CallerTrust::Network)
+    }
+
+    /// A core for the given caller. `CallerTrust::Local` is for the stdio MCP
+    /// server, whose parent process already controls the host.
+    pub fn with_trust(trust: CallerTrust) -> Result<Self> {
         let config_manager = ScannerConfigManager::new();
         let scanner_config = match config_manager.load_config() {
             Ok(config) => config,
@@ -180,6 +190,7 @@ impl MCPScannerCore {
         Ok(Self {
             scanner: MCPScanner::with_timeout(scanner_config.scanner.http_timeout)?,
             config_manager,
+            trust,
         })
     }
 
@@ -204,7 +215,9 @@ impl MCPScannerCore {
                     .format
                     .clone()
                     .unwrap_or(scanner_config.scanner.format),
-            );
+            )
+            // Stdio launches are a trust decision made by the caller, never by the request body.
+            .allow_stdio(self.trust.allows_stdio());
 
         // Handle auth headers with minimal conversion for Javelin API key
         if let Some(auth_headers) = &request.auth_headers {
@@ -240,6 +253,29 @@ impl MCPScannerCore {
     /// Perform a scan with the given options and change detection
     pub async fn scan(&self, request: ScanRequest) -> ScanResponse {
         let timestamp = chrono::Utc::now().to_rfc3339();
+
+        // Every target this request names is admitted or refused before any of
+        // them is contacted. That covers the main URL and the reference URL,
+        // and batch scans reach here one URL at a time.
+        let admission = admit_target(&request.url, self.trust).and_then(|()| {
+            request
+                .reference_url
+                .as_deref()
+                .map_or(Ok(()), |reference| admit_target(reference, self.trust))
+        });
+        if let Err(reason) = admission {
+            return ScanResponse {
+                success: false,
+                result: None,
+                error: Some(reason),
+                timestamp,
+                refresh_happened: false,
+                changes_detected: false,
+                change_summary: None,
+                scan_skipped: false,
+                cache_hit: false,
+            };
+        }
 
         // Check if change detection is requested
         if request.reference_url.is_some() {
@@ -553,10 +589,23 @@ impl MCPScannerCore {
             auth_headers: auth_headers.clone(),
             return_prompts: false,
             only: None,
+            allow_stdio: self.trust.allows_stdio(),
+            trust_workspace_configs: false,
         };
 
         let result = self.scanner.scan_single(url, scan_options).await?;
-        Ok(result.tools)
+        // `scan_single` reports connection and auth failures inside the result
+        // rather than as an error. An empty tool list from a failed connection
+        // must not be compared as if it were the server's real state.
+        match &result.status {
+            ScanStatus::Success => Ok(result.tools),
+            ScanStatus::Failed(reason)
+            | ScanStatus::ConnectionError(reason)
+            | ScanStatus::AuthenticationError(reason) => Err(anyhow!(
+                "reference URL {url} could not be scanned: {reason}"
+            )),
+            ScanStatus::Timeout => Err(anyhow!("reference URL {url} timed out")),
+        }
     }
 
     /// Check if tools have changed (simplified)
@@ -909,6 +958,103 @@ mod tests {
     fn test_mcp_scanner_core_creation() {
         let core = MCPScannerCore::new();
         assert!(core.is_ok());
+    }
+
+    // The probe binary below does not exist, so even if the policy let a
+    // spawn through, nothing runs. The tests assert the refusal instead.
+    const MISSING_STDIO: &str = "stdio:/nonexistent-ramparts-probe-binary:-c:true";
+
+    #[tokio::test]
+    async fn network_core_refuses_stdio_targets_before_any_launch() {
+        let core = MCPScannerCore::new().unwrap();
+        let response = core
+            .scan(ScanRequest {
+                url: MISSING_STDIO.to_string(),
+                ..Default::default()
+            })
+            .await;
+        assert!(!response.success);
+        assert!(response
+            .error
+            .unwrap_or_default()
+            .contains("trusted callers"));
+    }
+
+    #[tokio::test]
+    async fn network_core_refuses_scheme_less_stdio_targets() {
+        // The form that slipped past the REST check: no `//` after `stdio:`.
+        let core = MCPScannerCore::new().unwrap();
+        let response = core
+            .scan(ScanRequest {
+                url: "stdio:/nonexistent-ramparts-probe-binary".to_string(),
+                ..Default::default()
+            })
+            .await;
+        assert!(!response.success);
+    }
+
+    #[tokio::test]
+    async fn network_core_refuses_triple_slash_stdio_targets() {
+        // The `stdio:///` spelling is refused on the shared core path as well.
+        let core = MCPScannerCore::new().unwrap();
+        let response = core
+            .scan(ScanRequest {
+                url: "stdio:///nonexistent-ramparts-probe-binary".to_string(),
+                ..Default::default()
+            })
+            .await;
+        assert!(!response.success);
+        assert!(response
+            .error
+            .unwrap_or_default()
+            .contains("trusted callers"));
+    }
+
+    #[tokio::test]
+    async fn network_core_refuses_stdio_and_forged_reference_urls() {
+        // The main URL is public-looking; the reference URL is the problem. The
+        // refusal happens before either target is contacted.
+        let core = MCPScannerCore::new().unwrap();
+        let stdio_reference = core
+            .scan(ScanRequest {
+                url: "https://mcp.example.com/v1".to_string(),
+                reference_url: Some(MISSING_STDIO.to_string()),
+                ..Default::default()
+            })
+            .await;
+        assert!(!stdio_reference.success);
+        assert!(!stdio_reference.changes_detected);
+
+        let loopback_reference = core
+            .scan(ScanRequest {
+                url: "https://mcp.example.com/v1".to_string(),
+                reference_url: Some("http://127.0.0.1:9/probe".to_string()),
+                ..Default::default()
+            })
+            .await;
+        assert!(!loopback_reference.success);
+        assert!(!loopback_reference.changes_detected);
+    }
+
+    #[tokio::test]
+    async fn failed_reference_scan_is_reported_not_compared() {
+        // Trusted core, so the stdio targets are admitted. Both launches fail
+        // to spawn, which is how a dead reference server looks to the scanner.
+        // Before the fix a failed reference scan came back as success with a
+        // change comparison against an empty tool list.
+        let core = MCPScannerCore::with_trust(CallerTrust::Local).unwrap();
+        let response = core
+            .scan(ScanRequest {
+                url: MISSING_STDIO.to_string(),
+                reference_url: Some(MISSING_STDIO.to_string()),
+                timeout: Some(10),
+                http_timeout: Some(5),
+                ..Default::default()
+            })
+            .await;
+        assert!(!response.success);
+        assert!(!response.changes_detected);
+        assert!(response.error.unwrap_or_default().contains("reference URL"));
     }
 
     #[test]

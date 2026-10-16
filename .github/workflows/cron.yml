@@ -3,7 +3,7 @@ name: Cron Build - Highflame Ramparts Server
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 2 * * 1'  # Every Friday at 2:30 AM UTC = 8:00 AM IST
+    - cron: '30 2 * * 1'  # Every Monday at 2:30 AM UTC = 8:00 AM IST
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -47,7 +47,7 @@ jobs:
         uses: actions/create-github-app-token@v3
         id: token
         with:
-          client-id: ${{ secrets.HIGHFLAME_GITHUB_APP_ID }}
+          app-id: ${{ secrets.HIGHFLAME_GITHUB_APP_ID }}
           private-key: ${{ secrets.HIGHFLAME_GITHUB_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 

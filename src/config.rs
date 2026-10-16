@@ -1,12 +1,47 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tracing::{debug, warn};
 use url::Url;
+
+use crate::target_policy::{classify_scan_target, ScanTargetKind};
+
+/// Appended to a server's description when it comes from a workspace config
+/// (the working directory, a parent directory, or `--root`). Those files are
+/// part of the repository being scanned, so they are not trusted to launch.
+pub const WORKSPACE_SOURCE_TAG: &str = "[workspace]";
+
+/// Result text for a workspace server whose launch was withheld.
+pub const WORKSPACE_LAUNCH_SKIPPED: &str =
+    "not launched: this stdio server comes from a workspace config \
+     (the working directory, a parent directory or --root). It was analyzed statically. \
+     Re-run with --trust-workspace-configs to launch it.";
+
+/// Whether a server definition was read from a workspace config.
+pub fn is_workspace_server(server: &MCPServerConfig) -> bool {
+    server
+        .description
+        .as_deref()
+        .is_some_and(|d| d.contains(WORKSPACE_SOURCE_TAG))
+}
+
+/// Whether scanning this server means launching a local command.
+pub fn spawns_local_process(server: &MCPServerConfig) -> bool {
+    server.command.is_some()
+        || server
+            .scan_url()
+            .is_some_and(|url| matches!(classify_scan_target(url), Ok(ScanTargetKind::Stdio)))
+}
+
+/// Whether the scanner may launch this server's local command for this run.
+/// Workspace-config servers launch only when the operator opted in.
+pub fn may_launch_local_process(server: &MCPServerConfig, trust_workspace_configs: bool) -> bool {
+    !(is_workspace_server(server) && spawns_local_process(server) && !trust_workspace_configs)
+}
 
 /// MCP Configuration structure for reading from IDE config files
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -699,6 +734,9 @@ static CONFIG_PATHS_CACHE: LazyLock<Vec<(PathBuf, MCPClient)>> =
 /// IDE configuration file manager for MCP scanner
 pub struct MCPConfigManager {
     config_paths: Vec<(PathBuf, MCPClient)>,
+    /// Config paths that come from the working directory, a parent directory,
+    /// or `--root` rather than from the user's IDE locations.
+    workspace_paths: HashSet<PathBuf>,
 }
 
 impl MCPConfigManager {
@@ -731,7 +769,15 @@ impl MCPConfigManager {
     pub fn new() -> Self {
         Self {
             config_paths: CONFIG_PATHS_CACHE.clone(),
+            workspace_paths: Self::workspace_path_set(),
         }
+    }
+
+    fn workspace_path_set() -> HashSet<PathBuf> {
+        Self::get_workspace_paths()
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect()
     }
 
     /// Create a new configuration manager with fresh path discovery (bypasses cache)
@@ -741,6 +787,7 @@ impl MCPConfigManager {
         let paths = Self::discover_config_paths();
         Self {
             config_paths: paths,
+            workspace_paths: Self::workspace_path_set(),
         }
     }
 
@@ -1386,7 +1433,13 @@ impl MCPConfigManager {
                         }
                     }
 
-                    Self::merge_config_with_source(&mut merged_config, &config, client.name());
+                    let from_workspace = self.workspace_paths.contains(path);
+                    Self::merge_config_with_source(
+                        &mut merged_config,
+                        &config,
+                        client.name(),
+                        from_workspace,
+                    );
                     loaded_configs += 1;
                     debug!(
                         "Loaded MCP configuration from {} IDE: {}",
@@ -1894,19 +1947,29 @@ impl MCPConfigManager {
 
     /// Merge two configurations with IDE source information
     /// Handles server deduplication based on URL and preserves IDE source
-    fn merge_config_with_source(base: &mut MCPConfig, other: &MCPConfig, ide_name: &str) {
+    fn merge_config_with_source(
+        base: &mut MCPConfig,
+        other: &MCPConfig,
+        ide_name: &str,
+        from_workspace: bool,
+    ) {
         // Clone the config and add IDE source info to each server
         let mut config_with_source = other.clone();
         if let Some(ref mut servers) = config_with_source.servers {
             for server in servers.iter_mut() {
                 // Store IDE name in description field with a prefix
                 let ide_info = format!("IDE:{ide_name}");
+                let mut tags = format!("[{ide_info}]");
+                if from_workspace {
+                    tags.push(' ');
+                    tags.push_str(WORKSPACE_SOURCE_TAG);
+                }
                 match &server.description {
                     Some(desc) => {
-                        server.description = Some(format!("{desc} [{ide_info}]"));
+                        server.description = Some(format!("{desc} {tags}"));
                     }
                     None => {
-                        server.description = Some(format!("[{ide_info}]"));
+                        server.description = Some(tags);
                     }
                 }
             }
@@ -2335,8 +2398,12 @@ impl MCPConfigManager {
     /// repository of IDE configs without relying on the user's home
     /// directory state.
     pub fn with_root(root: &Path) -> Self {
+        let config_paths = Self::discover_config_paths_in_root(root);
+        // Everything found under --root is repository content.
+        let workspace_paths = config_paths.iter().map(|(path, _)| path.clone()).collect();
         Self {
-            config_paths: Self::discover_config_paths_in_root(root),
+            config_paths,
+            workspace_paths,
         }
     }
 
@@ -4024,5 +4091,78 @@ performance:
         env::remove_var("TEST_SECURITY_LLM_MODEL");
         env::remove_var("TEST_SECURITY_LLM_URL");
         env::remove_var("TEST_SECURITY_LLM_API_KEY");
+    }
+}
+
+#[cfg(test)]
+mod workspace_launch_tests {
+    use super::*;
+
+    /// The planted repo-local config lives under tests/fixtures. Loading it
+    /// through discovery tags it as a workspace config, and the launch gate must
+    /// then keep it from running without the opt-in. Nothing here spawns a process.
+    #[test]
+    fn repo_local_stdio_server_is_static_only_unless_trusted() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/repo-local-mcp");
+        let config = MCPConfigManager::with_root(&root).load_config();
+        let servers = config.servers.expect("fixture declares a server");
+        assert_eq!(servers.len(), 1);
+        let server = &servers[0];
+
+        assert!(is_workspace_server(server));
+        assert!(spawns_local_process(server));
+        assert!(!may_launch_local_process(server, false));
+        assert!(may_launch_local_process(server, true));
+    }
+
+    #[test]
+    fn user_level_stdio_servers_still_launch_without_the_flag() {
+        let server = MCPServerConfig {
+            name: Some("local".to_string()),
+            url: None,
+            command: Some("node".to_string()),
+            args: None,
+            env: None,
+            description: Some("[IDE:Cursor]".to_string()),
+            auth_headers: None,
+            options: None,
+        };
+        assert!(!is_workspace_server(&server));
+        assert!(may_launch_local_process(&server, false));
+    }
+
+    #[test]
+    fn workspace_http_servers_are_not_launches() {
+        // The gate is about local processes. A workspace HTTP entry is only a
+        // network request, so it is not withheld by this rule.
+        let server = MCPServerConfig {
+            name: Some("remote".to_string()),
+            url: Some("https://mcp.example.com/v1".to_string()),
+            command: None,
+            args: None,
+            env: None,
+            description: Some("[IDE:Cursor] [workspace]".to_string()),
+            auth_headers: None,
+            options: None,
+        };
+        assert!(!spawns_local_process(&server));
+        assert!(may_launch_local_process(&server, false));
+    }
+
+    #[test]
+    fn workspace_stdio_url_form_is_treated_as_a_launch() {
+        // A repo config could spell the launch as a `stdio:` URL instead of a command.
+        let server = MCPServerConfig {
+            name: None,
+            url: Some("stdio:/bin/sh:-c:true".to_string()),
+            command: None,
+            args: None,
+            env: None,
+            description: Some("[IDE:Cursor] [workspace]".to_string()),
+            auth_headers: None,
+            options: None,
+        };
+        assert!(spawns_local_process(&server));
+        assert!(!may_launch_local_process(&server, false));
     }
 }

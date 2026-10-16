@@ -18,4 +18,6 @@ RUN apt-get update \
 USER ${APP_USER}:${APP_USER}
 EXPOSE 8080
 
+# Set RAMPARTS_API_TOKEN in the platform environment. The API refuses every /v1 request
+# on this non-loopback bind without it; /healthz stays available for probes.
 ENTRYPOINT [ "/app/ramparts", "server", "--port", "8080", "--host", "0.0.0.0" ]

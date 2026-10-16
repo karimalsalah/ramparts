@@ -334,13 +334,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Manual Trivy Setup
         uses: aquasecurity/setup-trivy@v0.2.6
         with:
           cache: true
-          version: ${{ env.TRIVY_VER }}
 
       - name: Trivy Scan - Text Security Report
         id: trivy_scan_txt
@@ -378,7 +377,6 @@ jobs:
           format: "sarif"
           output: "${{ env.TRIVY_REPORT_FILE }}.sarif"
           severity: "${{ env.TRIVY_SEVERITY }}"
-          timeout: "${{ env.TRIVY_TIMEOUT }}"
           exit-code: 1
 
       - name: Upload Report - GitHub Security Report

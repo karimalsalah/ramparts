@@ -696,7 +696,7 @@ ps aux | grep ramparts
 # Test locally
 curl http://localhost:3000/v1/ramparts/health
 
-# Check host binding
+# Check host binding (non-loopback hosts need RAMPARTS_API_TOKEN, or /v1 returns 401)
 ramparts server --host 0.0.0.0 --port 3000
 
 # Check firewall

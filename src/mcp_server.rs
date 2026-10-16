@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use crate::core::{MCPScannerCore, ScanRequest};
+use crate::http_guard::{self, GuardConfig};
 use crate::scanner::MCPScanner;
+use crate::target_policy::CallerTrust;
 use crate::types::ScanConfigBuilder;
+use axum::middleware;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::schemars::JsonSchema;
 use rmcp::{
@@ -62,15 +65,19 @@ pub struct RampartsMcpServer {
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
     core: Arc<MCPScannerCore>,
+    trust: CallerTrust,
 }
 
 #[tool_router]
 impl RampartsMcpServer {
-    pub fn new() -> Self {
-        let core = MCPScannerCore::new().expect("core init");
+    /// `CallerTrust::Local` for the stdio transport, whose parent process
+    /// already controls the host. `CallerTrust::Network` for every HTTP transport.
+    pub fn new(trust: CallerTrust) -> Self {
+        let core = MCPScannerCore::with_trust(trust).expect("core init");
         Self {
             tool_router: Self::tool_router(),
             core: Arc::new(core),
+            trust,
         }
     }
 
@@ -113,8 +120,18 @@ impl RampartsMcpServer {
         &self,
         params: Parameters<ScanConfigParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        // This reads the server host's own IDE configs and launches their
+        // commands, so a network caller must not reach it.
+        if !self.trust.allows_stdio() {
+            return Err(ErrorData::invalid_request(
+                "scan-config launches the server host's own MCP servers, so it is only \
+                 available over the stdio transport"
+                    .to_string(),
+                None,
+            ));
+        }
         let p = params.0;
-        let mut builder = ScanConfigBuilder::new();
+        let mut builder = ScanConfigBuilder::new().allow_stdio(true);
         if let Some(d) = p.detailed {
             builder = builder.detailed(d);
         }
@@ -157,7 +174,7 @@ impl rmcp::ServerHandler for RampartsMcpServer {
 
 /// Run the MCP server over stdio transport.
 pub async fn run_stdio_server() -> Result<(), Box<dyn std::error::Error>> {
-    let handler = RampartsMcpServer::new();
+    let handler = RampartsMcpServer::new(CallerTrust::Local);
     let service = handler.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
@@ -181,15 +198,22 @@ pub async fn run_streamable_http_server(
     use axum::Router;
     use tower::ServiceBuilder;
 
+    // Network transport: the guard enforces the Host and Origin checks and a
+    // bearer token on any non-loopback bind.
+    let guard = std::sync::Arc::new(GuardConfig::from_env(host));
+    guard.log_posture();
+
     let bind: std::net::SocketAddr = format!("{host}:{port}").parse()?;
     let service: StreamableHttpService<RampartsMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
-            || Ok(RampartsMcpServer::new()),
+            || Ok(RampartsMcpServer::new(CallerTrust::Network)),
             std::sync::Arc::new(LocalSessionManager::default()),
             StreamableHttpServerConfig::default(),
         );
 
-    let app = Router::new().route("/", any_service(ServiceBuilder::new().service(service)));
+    let app = Router::new()
+        .route("/", any_service(ServiceBuilder::new().service(service)))
+        .layer(middleware::from_fn_with_state(guard, http_guard::guard));
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app).await?;
     Ok(())

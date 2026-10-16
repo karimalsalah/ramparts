@@ -49,6 +49,20 @@ On 2026-08-23 the estate adopted a tool and tested **five documented isolation f
 
 **Documented isolation is not proof of isolation.** For this fork, treat the home directory as presumed-at-risk until a diff says otherwise.
 
+## Isolation inventory (repo review, 2026-10-08)
+
+The record above predates these paths. Each one was read from source, not from a run.
+
+- **Home writes:** `~/.ramparts/content-baseline.json` (`src/baseline.rs:35-41`, saved at `:175` and `:238`), `~/.ramparts/mcp-baseline.json` (`src/scanner.rs:1839-1845`), and the baseline saves in `src/main.rs:713` and `:741`. A successful scan creates these. A failed scan does not, so an empty `HOME` after failed runs proves nothing.
+- **Home reads:** IDE config discovery under `~/.claude`, `~/.cursor`, `~/.vscode` and similar (`src/config.rs:971-1167`).
+- **Egress, target traffic:** the MCP server being scanned, and for `stdio:` targets the launched command.
+- **Egress, telemetry-like:** `https://api.osv.dev/v1/query` is queried for each `npx`/`uvx` stdio server, with no enable switch (`src/osv.rs:28`, `src/scanner.rs` around `1636-1642`).
+- **Egress, LLM analysis:** when analysis runs, scanned tool definitions go to the configured endpoint. The default is `https://api.openai.com` (`src/config.rs:3677`). If `LLM_API_KEY` is unset, `OPENAI_API_KEY` is used (`src/security/mod.rs:283-286`). Setting `OPENAI_API_KEY` in this sandbox therefore sends scanned tool definitions to OpenAI. Do not set it.
+- **Credentials:** none are needed. `RAMPARTS_API_TOKEN` is read only when the HTTP listeners run. It guards the listener and is not sent anywhere.
+- **Kill-switch addition:** also delete `~/.ramparts/` if it exists.
+- **Upstream:** this clone has only `origin` (`karimalsalah/ramparts`). The `upstream` remote named above is not configured here.
+- **Gate still open:** the before-and-after filesystem diff must come from a *successful* scan. The review above did not run one, so `~/.ramparts` is unverified.
+
 ## Never
 
 - Scan any MCP server we do not own.

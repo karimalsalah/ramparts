@@ -237,5 +237,4 @@ We welcome contributions to Ramparts. If you have suggestions, bug reports, or f
 ## Additional Resources
 - [Need Support?](https://github.com/highflame-ai/ramparts/issues)
 - [MCP Protocol Documentation](https://modelcontextprotocol.io/)
-// Examples folder was removed to reduce branch diff; see configuration docs instead.
 - [Configuration Guide](docs/configuration.md)
