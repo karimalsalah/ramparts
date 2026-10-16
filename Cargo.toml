@@ -138,7 +138,7 @@ jsonrpc-core = "18.0"
 yara-x = { git = "https://github.com/VirusTotal/yara-x", rev = "da19715dd4c8933d3b8e90d286baae8b2cc2e8b2", version = "1.21.0", optional = true }
 
 # Official Rust MCP SDK
-rmcp = { version = "3.1", features = [
+rmcp = { version = "3.5", features = [
     "client",
     "server",
     "macros",
