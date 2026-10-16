@@ -59,3 +59,5 @@ On 2026-08-23 the estate adopted a tool and tested **five documented isolation f
 ## Upstream
 
 `upstream` = `highflame-ai/ramparts`. We track it; we do not push to it. Contributions go upstream as normal PRs under Apache-2.0.
+
+- **2026-10-16 upstream bump:** merged `highflame-ai/ramparts` `main` at `14ff71e` (#152 semantic-release flow, #153 release tag fix; upstream deletes `cicd.yml`, `cron.yml` and `release-plz.yml`), ran a semver-compatible `cargo update`, moved the `yara-x` pin to `da19715d` (wasmtime 48.0.6) and swapped `serde_yaml` for `serde_norway` to clear RustSec findings. The dry-run gate above was **not** re-run for this bump and still needs running before any integration.
