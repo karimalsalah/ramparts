@@ -10,6 +10,7 @@ mod cache;
 mod config;
 mod constants;
 mod core;
+mod http_guard;
 #[cfg(test)]
 mod integration_tests;
 mod mcp_client;
@@ -23,6 +24,7 @@ mod scanner;
 mod security;
 mod server;
 mod skills;
+mod target_policy;
 mod taxonomy;
 mod tls;
 
@@ -169,6 +171,12 @@ enum Commands {
         #[arg(long, value_name = "PATH")]
         root: Option<std::path::PathBuf>,
 
+        /// Launch stdio servers defined in workspace configs (the working directory,
+        /// a parent directory, or --root). Off by default: those files come from the
+        /// repository being scanned, so they are analyzed statically only.
+        #[arg(long)]
+        trust_workspace_configs: bool,
+
         /// Restrict the scan to a subset of artifact kinds. Comma-separated:
         /// `tools`, `prompts`, `resources` (singular forms also accepted).
         #[arg(long, value_name = "KINDS")]
@@ -188,8 +196,8 @@ enum Commands {
         #[arg(short, long, default_value = "3000")]
         port: u16,
 
-        /// Host to bind the server to
-        #[arg(long, default_value = "0.0.0.0")]
+        /// Host to bind the server to. Non-loopback hosts require RAMPARTS_API_TOKEN.
+        #[arg(long, default_value = "127.0.0.1")]
         host: String,
     },
 
@@ -198,8 +206,8 @@ enum Commands {
 
     /// Run Ramparts as an MCP server over SSE (HTTP SSE endpoint)
     McpSse {
-        /// Host to bind the server to
-        #[arg(long, default_value = "0.0.0.0")]
+        /// Host to bind the server to. Non-loopback hosts require RAMPARTS_API_TOKEN.
+        #[arg(long, default_value = "127.0.0.1")]
         host: String,
         /// Port to run the SSE server on
         #[arg(short, long, default_value = "8000")]
@@ -208,8 +216,8 @@ enum Commands {
 
     /// Run Ramparts as an MCP server over streamable HTTP
     McpHttp {
-        /// Host to bind the server to
-        #[arg(long, default_value = "0.0.0.0")]
+        /// Host to bind the server to. Non-loopback hosts require RAMPARTS_API_TOKEN.
+        #[arg(long, default_value = "127.0.0.1")]
         host: String,
         /// Port to run the HTTP server on
         #[arg(short, long, default_value = "8081")]
@@ -522,6 +530,7 @@ async fn execute_command(
             timeout,
             http_timeout,
             root,
+            trust_workspace_configs,
             only,
         } => {
             handle_scan_config_command(
@@ -531,6 +540,7 @@ async fn execute_command(
                 timeout,
                 http_timeout,
                 root,
+                trust_workspace_configs,
                 only,
                 &scanner_config,
                 scanner,
@@ -1107,6 +1117,7 @@ async fn handle_scan_config_command(
     timeout: Option<u64>,
     http_timeout: Option<u64>,
     root: Option<std::path::PathBuf>,
+    trust_workspace_configs: bool,
     only: Option<String>,
     scanner_config: &ScannerConfig,
     scanner: Option<MCPScanner>,
@@ -1114,7 +1125,7 @@ async fn handle_scan_config_command(
     let auth_headers_map = parse_auth_headers(&auth_headers);
     let output_format = format.unwrap_or(scanner_config.scanner.format.clone());
     let only_kinds = parse_only_filter(only)?;
-    let options = build_scan_options(
+    let mut options = build_scan_options(
         scanner_config,
         &output_format,
         auth_headers_map,
@@ -1122,6 +1133,7 @@ async fn handle_scan_config_command(
         http_timeout,
         only_kinds,
     );
+    options.trust_workspace_configs = trust_workspace_configs;
 
     validate_scan_config(&options);
 
@@ -1246,6 +1258,8 @@ fn build_scan_options(
         .format(output_format.to_string())
         .auth_headers(auth_headers_map)
         .only(only_kinds)
+        // The CLI is the trusted caller: the operator runs it on their own host.
+        .allow_stdio(true)
         .build()
 }
 

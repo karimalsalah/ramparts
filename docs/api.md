@@ -39,12 +39,14 @@ The enhanced scan API includes intelligent change detection that automatically t
 Start Ramparts as a REST API server for continuous monitoring and integration with other systems:
 
 ```bash
-# Start server on default port 3000
+# Start server on the default loopback address and port 3000
 ramparts server
 
-# Start server on custom port and host
-ramparts server --port 8080 --host 0.0.0.0
+# Listen on all interfaces. This requires RAMPARTS_API_TOKEN (see Access Control).
+RAMPARTS_API_TOKEN=... ramparts server --port 8080 --host 0.0.0.0
 ```
+
+The server binds `127.0.0.1` by default. Read [Access Control](#access-control) before binding to any other address.
 
 Once started, the server provides a REST API with the following endpoints:
 
@@ -155,6 +157,8 @@ Get interactive API documentation with examples.
 **POST /v1/ramparts/scan**
 
 Scan a single MCP server for security vulnerabilities with intelligent change detection.
+
+Targets must be `http` or `https` (a host without a scheme is treated as `http`). A `stdio:` target launches a local process, so the server refuses it with `403`; use the CLI or the stdio MCP server for those. Private and loopback addresses are refused unless `RAMPARTS_ALLOW_PRIVATE_TARGETS=1`. The same rules apply to `reference_url` and to every URL in a batch.
 
 **Basic Request:**
 ```json
@@ -556,6 +560,20 @@ curl -X POST http://localhost:3000/v1/ramparts/batch-scan \
 }
 ```
 
+### 8. Analyze Pre-Fetched Data
+**POST /v1/ramparts/analyze**
+
+Run the security analysis on MCP data the caller already has. The server makes no upstream calls. Use it when the MCP server is reachable only through a gateway that holds its credentials.
+
+**Request body:** `url` (recorded on the result, never contacted), `scan_data` (`server_info`, `tools`, `resources`, `prompts`, `yara_results`, `fetch_errors`), and optional `timeout`, `detailed`, `format`, `return_prompts`.
+
+**Response:** the same envelope as the scan endpoint. The change-detection fields are always `false`.
+
+### 9. List Servers
+**GET /v1/ramparts/list-servers**
+
+Deprecated. The server keeps no registry. The response is always `success: false` with an empty `servers` list and `count: 0`. `register-server` and `unregister-server` are deprecated in the same way.
+
 ## Using the API
 
 ### Example: Basic Health Check
@@ -754,12 +772,17 @@ The API uses standard HTTP status codes and provides detailed error messages:
 }
 ```
 
-### CORS Support
+### Access Control
 
-The server includes CORS headers for browser-based applications:
-- `Access-Control-Allow-Origin: *`
-- `Access-Control-Allow-Methods: GET, POST, OPTIONS`
-- `Access-Control-Allow-Headers: *`
+Every `/v1/ramparts/*` route passes a guard:
+
+- **Host.** On a loopback bind only `localhost`, `127.0.0.1` and `::1` are accepted, plus any names in `RAMPARTS_ALLOWED_HOSTS`. This defeats DNS rebinding against a local server. A wildcard bind skips this check, because the bearer token is the control there.
+- **Origin.** A request that carries an `Origin` header must name an allowed origin: `https://studio.highflame.ai` plus any origins listed in `RAMPARTS_CORS_ORIGINS` (comma-separated). Other origins get no CORS grant and are refused with `403`.
+- **Bearer token.** A non-loopback bind requires `Authorization: Bearer <RAMPARTS_API_TOKEN>`. If no token is configured, every `/v1` request is refused with `401`. The probes `/health`, `/healthz` and `/livez` stay open so orchestrators can check the process.
+
+`RAMPARTS_API_TOKEN` is optional on a loopback bind. Set it there to require the token from local clients too.
+
+CORS headers are sent only for the allowlisted origins (`Access-Control-Allow-Methods: GET, POST, OPTIONS`; `Access-Control-Allow-Headers: Content-Type, Authorization`).
 
 ### Request Validation
 

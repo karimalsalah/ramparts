@@ -295,8 +295,6 @@ Ramparts is built to fit into modern development workflows. The CLI exits with a
 
 Whether you're using GitHub Actions, GitLab CI, Jenkins, or something else, the integration patterns are straightforward. Most teams start with CLI integration for quick wins, then move to server mode as their usage scales up.
 
-🔧 **[Complete Integration Guide](integration.md)** has examples for all the major CI/CD platforms, plus Docker and Kubernetes deployment patterns.
-
 ## Performance & Scalability
 
 ### Batch Operations
@@ -329,6 +327,6 @@ If you run into connection issues, try increasing timeouts with `--timeout 60`. 
 
 **Community Resources:**
 - [GitHub Issues](https://github.com/highflame-ai/ramparts/issues) for bug reports and feature requests
-- [Documentation](docs/) for comprehensive guides and references
+- [Documentation](./) for comprehensive guides and references
 
 The docs are designed to be practical—they focus on what you're trying to accomplish rather than just listing options. If something isn't clear or you think we're missing a use case, open an issue and let us know.

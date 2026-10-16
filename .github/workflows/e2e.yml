@@ -2,7 +2,7 @@ name: Cloud E2E - Ramparts
 
 on:
   schedule:
-    - cron: '30 1 * * 1,2,3,4,5'  # Daily at 1:30 AM UTC = 7:00 AM IST
+    - cron: '30 1 * * 1,2,3,4,5'  # Weekdays (Mon-Fri) at 1:30 AM UTC = 7:00 AM IST
   workflow_dispatch:
 
 concurrency:
@@ -22,7 +22,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

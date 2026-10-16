@@ -19,6 +19,8 @@ scanner:
   enable_yara: true
 security:
   enabled: true
+  # Not enforced yet: min_severity and checks.* are parsed but no code reads them,
+  # so every detection category runs. See docs/configuration.md.
   min_severity: low
   checks:
     tool_poisoning: true
@@ -37,5 +39,3 @@ logging:
 performance:
   tracking: true
   slow_threshold_ms: 5000
-# Tool storage directory for change detection (automatically created)
-# tool_storage: "./tool_storage"

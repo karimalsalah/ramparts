@@ -52,11 +52,10 @@ RUN apt-get update && apt-get install -y \
     maven \
     gradle \
     && rm -rf /var/lib/apt/lists/*
-# Set JAVA_HOME dynamically based on architecture
-RUN JAVA_HOME_PATH=$(find /usr/lib/jvm -name "java-21-openjdk-*" -type d | head -1) && \
-    echo "export JAVA_HOME=${JAVA_HOME_PATH}" >> /etc/environment && \
-    echo "export PATH=\${JAVA_HOME}/bin:\${PATH}" >> /etc/environment
-ENV JAVA_HOME="/usr/lib/jvm/java-21-openjdk-arm64"
+# Point JAVA_HOME at the installed JDK whatever the architecture (amd64 or arm64).
+# The link fails the build if no JDK is found.
+RUN ln -sfn "$(find /usr/lib/jvm -maxdepth 1 -type d -name 'java-21-openjdk-*' | head -1)" /usr/lib/jvm/java-21-openjdk
+ENV JAVA_HOME="/usr/lib/jvm/java-21-openjdk"
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # Install .NET 8 LTS (cached layer)
@@ -96,14 +95,17 @@ FROM rustlang/rust:nightly-slim AS builder
 
 WORKDIR /app
 
-# Copy dependency files first for better caching
+# Copy dependency files first for better caching. The workspace declares the
+# `common` member, so its manifest must be present before any cargo command runs.
 COPY Cargo.toml Cargo.lock* ./
+COPY common ./common
 
 # Create dummy main.rs to cache dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release && rm -rf src target/release/deps/ramparts*
 
 # Copy actual source code (this layer changes most often)
+COPY common ./common
 COPY src ./src
 COPY rules ./rules
 COPY assets ./assets
@@ -115,9 +117,15 @@ RUN cargo build --release
 # Stage 3: Final runtime stage
 FROM runtime-base
 
+# Unprivileged runtime user, matching Deploy-Dockerfile's uid.
+RUN groupadd -g 10000 ramparts \
+    && useradd -u 10000 -g ramparts -m -s /usr/sbin/nologin ramparts
+
 WORKDIR /app
 COPY --from=builder /app/target/release/ramparts /app/
 COPY --from=builder /app/rules /app/rules
+
+USER ramparts:ramparts
 
 # Default: run as MCP stdio server (MCP Toolkit/hosts connect over stdio)
 ENTRYPOINT ["/app/ramparts", "mcp-stdio"]

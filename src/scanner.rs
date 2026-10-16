@@ -5,6 +5,7 @@ use crate::security::{
     cross_origin_scanner::CrossOriginScanner, BatchScannableItem, SecurityScanResult,
     SecurityScanner,
 };
+use crate::target_policy::{classify_scan_target, ScanTargetKind, STDIO_REFUSED};
 use crate::types::{
     LlmPrompt, MCPPrompt, MCPResource, MCPServerInfo, MCPTool, ScanOptions, ScanResult, ScanStatus,
     YaraScanResult,
@@ -1344,9 +1345,14 @@ impl MCPScanner {
         debug!("Scanning {}", url);
 
         // STDIO URLs route through `scan_stdio_url` -> `scan_stdio_server`,
-        // which sets `response_time_ms` itself. Don't overwrite it here.
-        if url.starts_with("stdio:") {
-            return self.scan_stdio_url(url, options).await;
+        // which sets `response_time_ms` itself. Don't overwrite it here. The
+        // classification covers every spelling (`stdio:`, `stdio://`, any case).
+        match classify_scan_target(url).map_err(|reason| anyhow!(reason))? {
+            ScanTargetKind::Stdio if options.allow_stdio => {
+                return self.scan_stdio_url(url, options).await;
+            }
+            ScanTargetKind::Stdio => return Err(anyhow!(STDIO_REFUSED)),
+            ScanTargetKind::Http => {}
         }
 
         // Normalize URL with error context for HTTP URLs
@@ -1616,6 +1622,9 @@ impl MCPScanner {
         server_config: &MCPServerConfig,
         options: ScanOptions,
     ) -> Result<ScanResult> {
+        if !options.allow_stdio {
+            return Err(anyhow!(STDIO_REFUSED));
+        }
         let scan_timer = Timer::start();
         let command = server_config
             .command
@@ -2140,8 +2149,24 @@ impl MCPScanner {
                         let timeout_server_name = server.name.clone();
 
                         let scan_future = async {
+                            // A stdio server from a workspace config would run a command
+                            // from the repository being scanned. Static analysis above still
+                            // covers its definition; it is launched only when the operator
+                            // opted in for this run.
+                            let launch_allowed = config::may_launch_local_process(
+                                &server,
+                                server_options.trust_workspace_configs,
+                            );
                             // Scan the MCP server - HTTP or STDIO
-                            let mut result = if let Some(url) = server.scan_url() {
+                            let mut result = if !launch_allowed {
+                                let mut skipped = ScanResult::new(server.to_display_url());
+                                skipped.status = ScanStatus::Failed(
+                                    config::WORKSPACE_LAUNCH_SKIPPED.to_string(),
+                                );
+                                skipped.ide_source = Some(ide_source);
+                                attach_findings(&mut skipped);
+                                skipped
+                            } else if let Some(url) = server.scan_url() {
                                 // HTTP server scanning
                                 match scanner.scan_single(url, server_options).await {
                                     Ok(mut result) => {
